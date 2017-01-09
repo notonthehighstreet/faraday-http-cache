@@ -39,7 +39,7 @@ module Faraday
   #   end
   class HttpCache < Faraday::Middleware
     # Internal: valid options for the 'initialize' configuration Hash.
-    VALID_OPTIONS = [:store, :serializer, :logger, :shared_cache]
+    VALID_OPTIONS = [:store, :serializer, :logger, :shared_cache, :validate_ignored_headers]
 
     UNSAFE_METHODS = [:post, :put, :delete, :patch]
 
@@ -53,6 +53,7 @@ module Faraday
     #             :serializer    - A serializer that should respond to 'dump' and 'load'.
     #             :shared_cache  - A flag to mark the middleware as a shared cache or not.
     #             :store         - A cache store that should respond to 'read' and 'write'.
+    #             :validate_ignored_headers  - An array of headers to ignore during comparisons of requests when writing to the cache
     #
     # Examples:
     #
@@ -72,10 +73,10 @@ module Faraday
     def initialize(app, options = {})
       super(app)
       assert_valid_options!(options)
-
       @logger = options[:logger]
       @shared_cache = options.fetch(:shared_cache, true)
       @storage = create_storage(options)
+      @validate_ignored_headers = options.fetch(:validate_ignored_headers, []).map(&:downcase)
     end
 
     # Public: Process the request into a duplicate of this instance to
@@ -200,13 +201,29 @@ module Faraday
         response = Response.new(requested_env)
         if response.not_modified?
           trace :valid
+          entry_headers = entry.payload[:response_headers].clone
+          response_headers = response.payload[:response_headers]
           updated_payload = entry.payload
-          updated_payload[:response_headers].update(response.payload[:response_headers])
+          updated_payload[:response_headers].update(response_headers)
           requested_env.update(updated_payload)
           response = Response.new(updated_payload)
+          store(response) if updated_headers_in_cache?(entry_headers, response_headers)
+        else
+          store(response)
         end
-        store(response)
       end
+    end
+
+    def updated_headers_in_cache?(cached_response_headers, response_headers)
+      cached_response_headers_to_check = filter_validate_ignored_headers(cached_response_headers)
+      response_headers_to_check = filter_validate_ignored_headers(response_headers)
+
+      cached_response_headers_to_check.merge(response_headers_to_check) != cached_response_headers_to_check
+    end
+
+    def filter_validate_ignored_headers(headers)
+      ignored_headers = @validate_ignored_headers
+      headers.reject {|k,_| ignored_headers.include?(k.downcase) }
     end
 
     # Internal: Records a traced action to be used by the logger once the
